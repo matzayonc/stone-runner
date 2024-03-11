@@ -31,6 +31,7 @@ async fn run(mut command: Command, input: Option<String>) -> anyhow::Result<Stri
     let mut lines = reader.lines();
     let mut out = String::new();
     while let Some(line) = lines.next_line().await? {
+        println!("{}", line);
         out.push_str(&line);
     }
 
@@ -51,62 +52,89 @@ async fn run(mut command: Command, input: Option<String>) -> anyhow::Result<Stri
     Ok(out)
 }
 
-pub async fn rebuild() -> anyhow::Result<()> {
-    let mut rebuild_prover = Command::new("podman");
-    rebuild_prover
-        .arg("build")
-        .arg("-t")
-        .arg("fibonacci-prover")
-        .arg("-f")
-        .arg("prover.dockerfile")
-        .arg(".");
+impl Prover {
+    pub async fn pull(&self, prover: &str, verifier: &str) -> anyhow::Result<()> {
+        // podman pull neotheprogramist/verifier:latest
+        let mut command = Command::new("podman");
+        command.arg("pull").arg(format!("docker.io/{}", prover));
 
-    run(rebuild_prover, None)
-        .await
-        .context("Failed to rebuild prover")?;
+        run(command, None).await.context("Failed to pull prover")?;
 
-    let mut rebuild_verifier = Command::new("podman");
-    rebuild_verifier
-        .arg("build")
-        .arg("-t")
-        .arg("verifier")
-        .arg("-f")
-        .arg("verifier.dockerfile")
-        .arg(".");
+        let mut command = Command::new("podman");
+        command.arg("pull").arg(format!("docker.io/{}", verifier));
 
-    run(rebuild_verifier, None)
-        .await
-        .context("Failed to rebuild verifier")?;
+        run(command, None)
+            .await
+            .context("Failed to pull verifier")?;
 
-    Ok(())
+        Ok(())
+    }
+
+    pub async fn rebuild(&self) -> anyhow::Result<()> {
+        let mut rebuild_prover = Command::new("podman");
+        rebuild_prover
+            .arg("build")
+            .arg("-t")
+            .arg(&self.0)
+            .arg("-f")
+            .arg("prover.dockerfile")
+            .arg(".");
+
+        run(rebuild_prover, None)
+            .await
+            .context("Failed to rebuild prover")?;
+
+        let mut rebuild_verifier = Command::new("podman");
+        rebuild_verifier
+            .arg("build")
+            .arg("-t")
+            .arg("verifier")
+            .arg("-f")
+            .arg("verifier.dockerfile")
+            .arg(".");
+
+        run(rebuild_verifier, None)
+            .await
+            .context("Failed to rebuild verifier")?;
+
+        Ok(())
+    }
+
+    pub async fn prove(&self) -> anyhow::Result<String> {
+        let filename = Path::new(PROVER_PATH).join("program_input.json");
+        let file_content = fs::read_to_string(filename).await?;
+
+        let mut command = Command::new("podman");
+        command.arg("run").arg("-i").arg("--rm").arg(&self.0);
+
+        run(command, Some(file_content)).await
+    }
+
+    pub async fn verify(proof: String) -> anyhow::Result<()> {
+        let mut command = Command::new("podman");
+        command.arg("run").arg("-i").arg("--rm").arg("verifier");
+
+        run(command, Some(proof)).await?;
+
+        Ok(())
+    }
 }
 
-pub async fn prove() -> anyhow::Result<String> {
-    let filename = Path::new(PROVER_PATH).join("program_input.json");
-    let file_content = fs::read_to_string(filename).await?;
-
-    let mut command = Command::new("podman");
-    command
-        .arg("run")
-        .arg("-i")
-        .arg("--rm")
-        .arg("fibonacci-prover");
-
-    run(command, Some(file_content)).await
-}
-
-pub async fn verify(proof: String) -> anyhow::Result<()> {
-    let mut command = Command::new("podman");
-    command.arg("run").arg("-i").arg("--rm").arg("verifier");
-
-    run(command, Some(proof)).await?;
-
-    Ok(())
-}
+pub struct Prover(String);
 
 #[tokio::test]
 async fn test_build() {
-    rebuild().await.unwrap();
-    let proof = prove().await.unwrap();
-    verify(proof).await.unwrap();
+    // prepare
+    let prover = Prover("fibonacci-prover".to_string());
+    prover
+        .pull(
+            "neotheprogramist/fibonacci-prover:latest",
+            "neotheprogramist/verifier",
+        )
+        .await
+        .unwrap();
+
+    // proof and verify
+    let proof = prover.prove().await.unwrap();
+    Prover::verify(proof).await.unwrap();
 }
