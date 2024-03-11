@@ -1,17 +1,13 @@
-use std::{path::Path, process::Stdio};
+use std::process::Stdio;
 
 use anyhow::{bail, Context};
 use tokio::{
-    fs,
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
 };
 
-const PROVER_PATH: &str = "./stone-prover";
-
 async fn run(mut command: Command, input: Option<String>) -> anyhow::Result<String> {
     command
-        .current_dir(Path::new(PROVER_PATH))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::piped());
@@ -100,14 +96,11 @@ impl Prover {
         Ok(())
     }
 
-    pub async fn prove(&self) -> anyhow::Result<String> {
-        let filename = Path::new(PROVER_PATH).join("program_input.json");
-        let file_content = fs::read_to_string(filename).await?;
-
+    pub async fn prove(&self, input: String) -> anyhow::Result<String> {
         let mut command = Command::new("podman");
         command.arg("run").arg("-i").arg("--rm").arg(&self.0);
 
-        run(command, Some(file_content)).await
+        run(command, Some(input)).await
     }
 
     pub async fn verify(proof: String) -> anyhow::Result<()> {
@@ -134,7 +127,8 @@ async fn test_build() {
         .await
         .unwrap();
 
+    let input = r#"{"fibonacci_claim_index": 10 }"#.to_owned();
     // proof and verify
-    let proof = prover.prove().await.unwrap();
+    let proof = prover.prove(input).await.unwrap();
     Prover::verify(proof).await.unwrap();
 }
