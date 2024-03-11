@@ -1,9 +1,4 @@
-use core::fmt;
-use std::{
-    error::Error,
-    path::Path,
-    process::{Output, Stdio},
-};
+use std::{path::Path, process::Stdio};
 
 use anyhow::{bail, Context};
 use tokio::{
@@ -14,34 +9,29 @@ use tokio::{
 
 const PROVER_PATH: &str = "./stone-prover";
 
-#[derive(Debug)]
-struct StoneRunner(String);
-impl Error for StoneRunner {}
-impl fmt::Display for StoneRunner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 async fn run(mut command: Command, input: Option<String>) -> anyhow::Result<String> {
-    command.current_dir(Path::new(PROVER_PATH));
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .current_dir(Path::new(PROVER_PATH))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::piped());
 
     let mut child = command.spawn()?;
 
     if let Some(input) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input.as_bytes()).await?;
-        }
-    }
+        let mut stdin = child.stdin.take().context("failed to open stdin")?;
 
-    println!("hererereer");
+        tokio::spawn(async move {
+            stdin.write_all(input.as_bytes()).await.unwrap();
+        });
+    }
 
     let stdout = child.stdout.take().context("failed to open stdout")?;
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
+    let mut out = String::new();
     while let Some(line) = lines.next_line().await? {
-        println!("{}", line);
+        out.push_str(&line);
     }
 
     let status = child.wait().await?;
@@ -56,22 +46,14 @@ async fn run(mut command: Command, input: Option<String>) -> anyhow::Result<Stri
             bail!("Podman error: {}", err)
         };
         bail!("Error without stderr")
-    } else {
-        if let Some(mut output) = child.stdout.take() {
-            let mut out = Vec::new();
-            output.read_to_end(&mut out).await?;
-
-            // Handle error output
-            let out = String::from_utf8(out)?;
-            return Ok(out);
-        }
     }
-    Ok(String::new())
+
+    Ok(out)
 }
 
 pub async fn rebuild() -> anyhow::Result<()> {
-    let mut command = Command::new("podman");
-    command
+    let mut rebuild_prover = Command::new("podman");
+    rebuild_prover
         .arg("build")
         .arg("-t")
         .arg("fibonacci-prover")
@@ -79,10 +61,24 @@ pub async fn rebuild() -> anyhow::Result<()> {
         .arg("prover.dockerfile")
         .arg(".");
 
-    match run(command, None).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
-    }
+    run(rebuild_prover, None)
+        .await
+        .context("Failed to rebuild prover")?;
+
+    let mut rebuild_verifier = Command::new("podman");
+    rebuild_verifier
+        .arg("build")
+        .arg("-t")
+        .arg("verifier")
+        .arg("-f")
+        .arg("verifier.dockerfile")
+        .arg(".");
+
+    run(rebuild_verifier, None)
+        .await
+        .context("Failed to rebuild verifier")?;
+
+    Ok(())
 }
 
 pub async fn prove() -> anyhow::Result<String> {
@@ -96,20 +92,21 @@ pub async fn prove() -> anyhow::Result<String> {
         .arg("--rm")
         .arg("fibonacci-prover");
 
-    println!("Running verification");
-
     run(command, Some(file_content)).await
 }
 
 pub async fn verify(proof: String) -> anyhow::Result<()> {
+    let mut command = Command::new("podman");
+    command.arg("run").arg("-i").arg("--rm").arg("verifier");
+
+    run(command, Some(proof)).await?;
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_build() {
     rebuild().await.unwrap();
-    println!("Build successful");
     let proof = prove().await.unwrap();
-    println!("{}", proof);
-    // verify(proof).await.unwrap();
+    verify(proof).await.unwrap();
 }
